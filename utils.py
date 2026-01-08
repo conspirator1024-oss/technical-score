@@ -128,3 +128,125 @@ def calculate_score(symbol):
         "details": details,
         "df": df  # Return DataFrame for plotting
     }
+
+# ───────────────────────────────
+# 새로운 기능: Technical Analysis (EMA + RS)
+# ───────────────────────────────
+import yfinance as yf
+import mplfinance as mpf
+import matplotlib.pyplot as plt
+
+def get_stock_data_yf(ticker, start_date, end_date):
+    try:
+        # Ticker 객체 생성
+        stock_ticker = yf.Ticker(ticker)
+        spy_ticker = yf.Ticker("SPY")
+
+        # 히스토리 데이터 가져오기
+        stock = stock_ticker.history(start=start_date, end=end_date)
+        spy = spy_ticker.history(start=start_date, end=end_date)
+
+        if stock.empty or spy.empty:
+             return None, None
+
+        # EMA 계산
+        stock['EMA10'] = stock['Close'].ewm(span=10, adjust=False).mean()
+        stock['EMA21'] = stock['Close'].ewm(span=21, adjust=False).mean()
+
+        # 데이터 타입 변환
+        for df in [stock, spy]:
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # 결측치 제거
+        stock = stock.dropna()
+        spy = spy.dropna()
+
+        return stock, spy
+    except Exception as e:
+        print(f"데이터 다운로드 중 오류 발생: {e}")
+        return None, None
+
+def calculate_rs(stock_df, spy_df):
+    try:
+        # 공통 날짜만 사용
+        common_dates = stock_df.index.intersection(spy_df.index)
+        if len(common_dates) == 0:
+            return None, None
+            
+        stock_df = stock_df.loc[common_dates]
+        spy_df = spy_df.loc[common_dates]
+
+        # 수익률 계산
+        stock_returns = stock_df['Close'].pct_change().fillna(0)
+        spy_returns = spy_df['Close'].pct_change().fillna(0)
+
+        # RS Line 계산
+        rs_line = (1 + stock_returns).cumprod() / (1 + spy_returns).cumprod()
+
+        # RS Line 정규화 (0-100 스케일)
+        rs_line = (rs_line - rs_line.min()) / (rs_line.max() - rs_line.min()) * 100
+
+        # RS 50일 이동평균 계산
+        rs_ma50 = rs_line.rolling(window=50).mean()
+
+        return rs_line, rs_ma50
+    except Exception as e:
+        print(f"RS 계산 중 오류 발생: {e}")
+        return None, None
+
+def get_technical_analysis_fig(ticker):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+    
+    # 데이터 가져오기
+    stock_df, spy_df = get_stock_data_yf(ticker, start_date, end_date)
+    if stock_df is None or spy_df is None or stock_df.empty or spy_df.empty:
+        return None, "유효한 데이터를 가져올 수 없습니다. (Tickers might be invalid or no data found)"
+
+    # RS 계산
+    rs_line, rs_ma50 = calculate_rs(stock_df, spy_df)
+    if rs_line is None:
+        return None, "RS 계산 실패 (데이터 부족 또는 날짜 불일치)"
+
+    # 차트 스타일 설정
+    mc = mpf.make_marketcolors(up='green',
+                              down='red',
+                              edge='inherit',
+                              wick='inherit',
+                              volume='in')
+    s = mpf.make_mpf_style(marketcolors=mc)
+
+    # EMA와 RS 라인을 위한 애드온 설정
+    addplot = [
+        mpf.make_addplot(stock_df['EMA10'], color='orange', width=1.2, label='10 EMA'),  # 두께 증가
+        mpf.make_addplot(stock_df['EMA21'], color='blue', width=1.2, label='21 EMA'),    # 두께 증가
+        mpf.make_addplot(rs_line, panel=1, color='purple',
+                        title='RS Line', ylabel='RS'),
+        mpf.make_addplot(rs_ma50, panel=1, color='gray', width=1.0,
+                        linestyle='--')
+    ]
+
+    try:
+        # 차트 그리기
+        fig, axes = mpf.plot(stock_df,
+                            type='candle',
+                            style=s,
+                            addplot=addplot,
+                            returnfig=True,
+                            figsize=(12, 8),
+                            panel_ratios=(7,3),
+                            title=f'\n{ticker} Technical Analysis')
+
+        # 패널 제목 설정
+        axes[0].set_title('Price (with 10 & 21 EMA)')
+        axes[1].set_title('Relative Strength with 50MA')
+
+        # 범례 추가 및 위치 조정
+        axes[0].legend(['10 EMA (Orange)', '21 EMA (Blue)'], loc='upper left')
+        axes[1].legend(['RS', 'RS 50MA'], loc='upper left')
+        
+        return fig, None
+    except Exception as e:
+        return None, f"차트 그리기 중 오류 발생: {e}"

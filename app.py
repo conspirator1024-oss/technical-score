@@ -1,6 +1,6 @@
 import streamlit as st
 import plotly.graph_objects as go
-from utils import calculate_score
+from utils import calculate_score, get_technical_analysis_fig
 
 st.set_page_config(page_title="Stock Trend Scorer", layout="wide")
 
@@ -72,3 +72,19 @@ if submitted or ticker:
             # Data Table (Optional)
             with st.expander("See raw data"):
                 st.dataframe(df.tail(200))
+                
+            # ───────────────────────────────
+            # New Feature: Technical Analysis Chart
+            # ───────────────────────────────
+            st.divider()
+            st.subheader(f"📊 Advanced Technical Analysis: {ticker}")
+            st.markdown("This chart shows **Price with EMAs (10, 21)** and **Relative Strength (RS) vs SPY**.")
+            
+            with st.spinner("Generating Technical Chart..."):
+                tech_fig, error_msg = get_technical_analysis_fig(ticker)
+                
+            if error_msg:
+                st.error(f"Could not generate technical chart (using yfinance): {error_msg}")
+                st.info("Note: 'yfinance' mainly supports US stocks. For Korean stocks, try adding '.KS' (e.g. 005930.KS).")
+            else:
+                st.pyplot(tech_fig)

@@ -3,3 +3,5 @@ finance-datareader
 pandas
 numpy
 plotly
+yfinance
+mplfinance

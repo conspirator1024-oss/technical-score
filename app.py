@@ -1,6 +1,6 @@
 import streamlit as st
 import plotly.graph_objects as go
-from utils import calculate_score, get_technical_analysis_fig, get_roc_analysis_fig, get_kama_analysis_fig
+from utils import calculate_score, get_technical_analysis_fig, get_roc_analysis_fig, get_kama_analysis_fig, run_backtest_strategy, get_backtest_fig
 
 st.set_page_config(page_title="Stock Trend Scorer", layout="wide")
 
@@ -16,6 +16,15 @@ with st.sidebar:
     st.header("Search Settings")
     ticker = st.text_input("Enter Stock Ticker", value="AAPL", help="Enter symbol like AAPL, TSLA, or 005930 (for KRX)").strip().upper()
     submitted = st.button("Analyze Stock", type="primary")
+
+    st.divider()
+    st.header("Strategy Backtest Settings")
+    run_bt = st.button("Run Backtest Strategy")
+    with st.expander("Strategy Parameters"):
+        ema_fast_param = st.number_input("Fast EMA", value=20)
+        ema_slow_param = st.number_input("Slow EMA", value=50)
+        obv_ma_param = st.number_input("OBV MA", value=50)
+        capital_param = st.number_input("Initial Capital ($)", value=100000)
 
 if submitted or ticker:
     if not ticker:
@@ -126,3 +135,48 @@ if submitted or ticker:
                 st.error(f"Could not generate KAMA analysis: {kama_error}")
             else:
                 st.pyplot(kama_fig)
+
+# ───────────────────────────────
+# Backtest Section (Triggered by button)
+# ───────────────────────────────
+if run_bt and ticker:
+    st.divider()
+    st.header(f"🛠️ Strategy Backtest Results: {ticker}")
+    st.info("Strategy: Buy when Fast EMA > Slow EMA (Trend) AND OBV > OBV_MA (Volume Support). Sell when trend weakens.")
+    
+    with st.spinner("Running Backtest Simulation..."):
+        bt_df, metrics, bt_error = run_backtest_strategy(ticker, 
+                                                         ema_fast=ema_fast_param, 
+                                                         ema_slow=ema_slow_param, 
+                                                         obv_ma=obv_ma_param, 
+                                                         capital=capital_param)
+
+    if bt_error:
+        st.error(f"Backtest Failed: {bt_error}")
+    elif bt_df is not None:
+        # 1. Metrics Display
+        m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+        m_col1.metric("CAGR (Annual Return)", f"{metrics.cagr:.2f}%")
+        m_col2.metric("Max Drawdown (MDD)", f"{metrics.mdd:.2f}%")
+        m_col3.metric("Sharpe Ratio", f"{metrics.sharpe:.2f}")
+        m_col4.metric("Current State", metrics.state, delta=f"Last Buy: {metrics.last_buy}")
+        
+        # 2. Equity Curve Chart
+        st.subheader("💰 Equity Curve (Strategy vs Buy & Hold)")
+        fig_eq = go.Figure()
+        fig_eq.add_trace(go.Scatter(x=bt_df.index, y=bt_df['Equity'], mode='lines', name='Strategy Equity', line=dict(color='chartreuse')))
+        fig_eq.add_trace(go.Scatter(x=bt_df.index, y=bt_df['BuyHold'], mode='lines', name='Buy & Hold', line=dict(color='gray', dash='dash')))
+        fig_eq.update_layout(template="plotly_dark", yaxis_title="Capital Value")
+        st.plotly_chart(fig_eq, use_container_width=True)
+        
+        # 3. Signals Chart
+        st.subheader("🚦 Trade Signals (Last 1 Year)")
+        bt_fig, plot_err = get_backtest_fig(ticker, bt_df)
+        if plot_err:
+            st.error(plot_err)
+        else:
+            st.pyplot(bt_fig)
+
+        # 4. Data Table
+        with st.expander("View Detailed Log"):
+            st.dataframe(bt_df[['Close', 'EMA_fast', 'EMA_slow', 'OBV', 'Position', 'Equity']].tail(100))

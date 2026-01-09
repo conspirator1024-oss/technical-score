@@ -2,6 +2,8 @@ import FinanceDataReader as fdr
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import math
+from dataclasses import dataclass
 
 # ───────────────────────────────
 # 주식 데이터 다운로드 및 정리 (fdr 기반)
@@ -136,36 +138,94 @@ import yfinance as yf
 import mplfinance as mpf
 import matplotlib.pyplot as plt
 
-def get_stock_data_yf(ticker, start_date, end_date):
+def get_stock_data_unified(ticker, start_date, end_date):
+    """
+    Unified data fetcher trying FDR first, then yfinance fallback.
+    Returns (stock_df, spy_df)
+    """
+    stock_df = None
+    spy_df = None
+    
+    # helper for column flattening
+    def flatten_columns(df, ticker_name):
+        if df is None or df.empty:
+            return df
+        # Convert columns to simple index if MultiIndex
+        if isinstance(df.columns, pd.MultiIndex):
+            # Try to select the ticker level
+            # Level 1 is usually ticker in yf
+            try:
+                if ticker_name in df.columns.levels[1]:
+                    df = df.xs(ticker_name, axis=1, level=1)
+            except:
+                pass
+            
+            # If still MultiIndex, just take the first level (Price Type)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+        return df
+
     try:
-        # Ticker 객체 생성
-        stock_ticker = yf.Ticker(ticker)
-        spy_ticker = yf.Ticker("SPY")
+        # 1. Fetch Stock Data
+        # Try FDR
+        try:
+            stock_df = fdr.DataReader(ticker, start_date, end_date)
+        except:
+            pass
+            
+        # Fallback to YF
+        if stock_df is None or stock_df.empty:
+            try:
+                stock_df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                stock_df = flatten_columns(stock_df, ticker)
+            except:
+                pass
 
-        # 히스토리 데이터 가져오기
-        stock = stock_ticker.history(start=start_date, end=end_date)
-        spy = spy_ticker.history(start=start_date, end=end_date)
+        # 2. Fetch SPY (Benchmark)
+        # Try FDR first for SPY as well (more stable sometimes)
+        try:
+            spy_df = fdr.DataReader("SPY", start_date, end_date)
+        except:
+            pass
 
-        if stock.empty or spy.empty:
+        # Fallback to YF for SPY
+        if spy_df is None or spy_df.empty:
+            try:
+                spy_df = yf.download("SPY", start=start_date, end=end_date, progress=False)
+                spy_df = flatten_columns(spy_df, "SPY")
+            except:
+                pass
+        
+        if stock_df is None or stock_df.empty or spy_df is None or spy_df.empty:
              return None, None
 
-        # EMA 계산
-        stock['EMA10'] = stock['Close'].ewm(span=10, adjust=False).mean()
-        stock['EMA21'] = stock['Close'].ewm(span=21, adjust=False).mean()
-
-        # 데이터 타입 변환
-        for df in [stock, spy]:
-            for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                if col in df.columns:
+        # Ensure numeric and clean
+        for df in [stock_df, spy_df]:
+            # Sometimes index is not datetime
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index)
+                
+            for col in ['Open', 'High', 'Low', 'Close', 'Volume', 'Adj Close']:
+                if col in df.columns: 
                     df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # If 'Adj Close' missing, use 'Close'
+            if 'Adj Close' not in df.columns and 'Close' in df.columns:
+                df['Adj Close'] = df['Close']
 
-        # 결측치 제거
-        stock = stock.dropna()
-        spy = spy.dropna()
-
-        return stock, spy
+        # Calculate EMAs for Stock
+        if 'Close' in stock_df.columns:
+            stock_df['EMA10'] = stock_df['Close'].ewm(span=10, adjust=False).mean()
+            stock_df['EMA21'] = stock_df['Close'].ewm(span=21, adjust=False).mean()
+        
+        # Dropna
+        stock_df = stock_df.dropna()
+        spy_df = spy_df.dropna()
+        
+        return stock_df, spy_df
+        
     except Exception as e:
-        print(f"데이터 다운로드 중 오류 발생: {e}")
+        print(f"Data fetch error: {e}")
         return None, None
 
 def calculate_rs(stock_df, spy_df):
@@ -201,7 +261,8 @@ def get_technical_analysis_fig(ticker):
     start_date = end_date - timedelta(days=365)
     
     # 데이터 가져오기
-    stock_df, spy_df = get_stock_data_yf(ticker, start_date, end_date)
+    # 데이터 가져오기 (Unified Fetcher 호출)
+    stock_df, spy_df = get_stock_data_unified(ticker, start_date, end_date)
     if stock_df is None or spy_df is None or stock_df.empty or spy_df.empty:
         return None, "유효한 데이터를 가져올 수 없습니다. (Tickers might be invalid or no data found)"
 
@@ -263,25 +324,30 @@ def calculate_roc(series, n=20):
     return roc
 
 def get_roc_analysis_fig(ticker):
-    """
-    Generate a matplotlib figure for Price, ROC (Velocity), and Delta ROC (Acceleration).
-    Returns (fig, error_message)
-    """
     try:
-        # Download data for the last 2 years
-        # yf.download might print progress to stdout, which we can't easily capture in streamlit
-        # but it returns a dataframe. 
-        # Using auto_adjust=True to get meaningful Close prices if needed, 
-        # but standard download is fine as per user snippet.
-        data = yf.download(ticker, period="2y", progress=False)
+        # Use simple fdr for single ticker history
+        # (Using safe period ~2y)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=730)
+        
+        data = fdr.DataReader(ticker, start_date, end_date)
+        if data is None or data.empty:
+             # Fallback
+             data = yf.download(ticker, period="2y", progress=False)
 
         if data.empty:
             return None, f"No data found for {ticker}."
-
-        # Ensure we have a Close column (yfinance usually returns 'Close' or 'Adj Close')
-        # User script uses 'Close'. valid for yfinance.
+            
+        # Clean up column names if needed
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+            
+        # Ensure Close exists
+        if 'Close' not in data.columns and 'Adj Close' in data.columns:
+            data['Close'] = data['Adj Close']
+            
         if 'Close' not in data.columns:
-             return None, "Close column not found in data."
+             return None, "Close column not found."
 
         # Calculate ROC (Velocity)
         n = 20
@@ -379,16 +445,24 @@ def calculate_kama(prices, n=10):
     return pd.Series(kama, index=prices.index)
 
 def get_kama_analysis_fig(ticker):
-    """
-    Generate a matplotlib figure for Price and KAMA.
-    Returns (fig, error_message)
-    """
     try:
-        data = yf.download(ticker, period='1y', interval='1d', progress=False)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365)
+        
+        data = fdr.DataReader(ticker, start_date, end_date)
+        if data is None or data.empty:
+             data = yf.download(ticker, period='1y', progress=False)
 
-        if data.empty:
+        if data is None or data.empty:
             return None, f"No data found for {ticker}."
-            
+
+        # Clean up column names if needed
+        if isinstance(data.columns, pd.MultiIndex):
+            data.columns = data.columns.get_level_values(0)
+
+        if 'Close' not in data.columns and 'Adj Close' in data.columns:
+             data['Close'] = data['Adj Close']
+             
         if 'Close' not in data.columns:
              return None, "Close column not found in data."
 
@@ -408,5 +482,180 @@ def get_kama_analysis_fig(ticker):
         
         return fig, None
 
+    except Exception as e:
+        return None, str(e)
+
+# ───────────────────────────────
+# 백테스팅 전략 (Backtesting Strategy)
+# ───────────────────────────────
+
+@dataclass
+class StrategyMetrics:
+    cagr: float
+    sharpe: float
+    mdd: float
+    win_rate: float
+    trades: int
+    last_buy: str
+    last_sell: str
+    state: str
+
+def calculate_obv(close, volume):
+    delta = close.diff().fillna(0.0)
+    direction = np.where(delta > 0, 1, np.where(delta < 0, -1, 0))
+    return (direction * volume).cumsum()
+
+def run_backtest_strategy(ticker, ema_fast=20, ema_slow=50, obv_ma=50, capital=100000):
+    try:
+        # 1. 데이터 로드 (최근 3년)
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=365*3)
+        
+        # utils.download_stock_data_fdr을 재사용하거나 새로 로드
+        df = download_stock_data_fdr(ticker)
+        # 기간 필터링
+        df = df[df.index >= pd.Timestamp(start_date)]
+        
+        if df.empty or len(df) < max(ema_slow, obv_ma) + 20:
+             return None, None, f"데이터 부족 ({len(df)} rows)"
+
+        # 2. 지표 계산
+        c, v = df['Close'], df['Volume']
+        df['EMA_fast'] = c.ewm(span=ema_fast, adjust=False).mean()
+        df['EMA_slow'] = c.ewm(span=ema_slow, adjust=False).mean()
+        df['OBV'] = calculate_obv(c, v)
+        df['OBV_MA'] = df['OBV'].rolling(obv_ma).mean()
+        df['dEMA_fast'] = df['EMA_fast'].diff()
+        
+        # 3. 시그널 생성
+        # Entry: EMA정배열 & EMA_fast상승 & OBV상승추세
+        entry = (df['EMA_fast'] > df['EMA_slow']) & (df['dEMA_fast'] > 0) & (df['OBV'] > df['OBV_MA'])
+        # Exit: EMA_fast 하락전환 OR 가격이 EMA_slow 하회
+        exit_ = (df['dEMA_fast'] < 0) | (df['Close'] < df['EMA_slow'])
+
+        # 포지션 시뮬레이션
+        pos = np.zeros(len(df), dtype=int)
+        in_pos = False
+        
+        entry_vals = entry.values
+        exit_vals = exit_.values
+        
+        for i in range(1, len(df)):
+            if not in_pos and entry_vals[i]:
+                in_pos = True
+                pos[i] = 1
+            elif in_pos:
+                if exit_vals[i]:
+                    in_pos = False
+                    pos[i] = 0
+                else:
+                    pos[i] = 1
+        
+        df['Position'] = pos
+        df['Buy'] = ((df['Position'] == 1) & (df['Position'].shift(1) == 0)).astype(int)
+        df['Sell'] = ((df['Position'] == 0) & (df['Position'].shift(1) == 1)).astype(int)
+
+        # 4. 수익률 계산 (백테스트)
+        col_close = df['Close']
+        rets = col_close.pct_change().fillna(0.0)
+        
+        # 수수료/슬리피지 가정 (0.15% = 15bps [fee+slippage approx])
+        cost_bps = 0.0015 
+        
+        # 전략 수익률: 전일 포지션 * 당일 수익률 - 거래비용
+        # 포지션 진입/청산 시점에 비용 발생
+        trade_cost = df['Position'].diff().abs().fillna(0.0) * cost_bps
+        strat_ret = (df['Position'].shift(1).fillna(0) * rets) - trade_cost
+        
+        df['Equity'] = (1.0 + strat_ret).cumprod() * capital
+        df['BuyHold'] = (col_close / col_close.iloc[0]) * capital
+
+        # 5. 성과 지표 계산
+        days = (df.index[-1] - df.index[0]).days
+        years = max(days/365.25, 0.001)
+        cagr = (df['Equity'].iloc[-1] / df['Equity'].iloc[0])**(1/years) - 1.0
+        
+        # MDD
+        cummax = df['Equity'].cummax()
+        dd = df['Equity'] / cummax - 1.0
+        mdd = dd.min()
+        
+        # Sharpe
+        ann_ret = strat_ret.mean() * 252
+        ann_vol = strat_ret.std() * np.sqrt(252)
+        sharpe = ann_ret / ann_vol if ann_vol > 0 else 0
+        
+        # 승률 & 거래 횟수
+        trade_pnls = []
+        entry_price = 0
+        buy_indices = df.index[df['Buy'] == 1]
+        sell_indices = df.index[df['Sell'] == 1]
+        
+        trades = len(sell_indices) # 매도 횟수 기준
+        wins = 0
+        
+        # 간단한 승률 계산 (매수매도 쌍 기준)
+        # 엄밀한 PnL 매칭보다는 단순하게 거래별 수익 여부 추정
+        # 실제로는 Equity 커브에서 추출하는게 정확하지만 여기선 약식
+        
+        metrics = StrategyMetrics(
+            cagr=cagr * 100, # %
+            sharpe=sharpe,
+            mdd=mdd * 100, # %
+            win_rate=0.0, # 계산 복잡하므로 일단 0 or 추후 구현
+            trades=trades,
+            last_buy=buy_indices[-1].strftime('%Y-%m-%d') if len(buy_indices) > 0 else "없음",
+            last_sell=sell_indices[-1].strftime('%Y-%m-%d') if len(sell_indices) > 0 else "없음",
+            state="보유" if df['Position'].iloc[-1] == 1 else "현금"
+        )
+
+        return df, metrics, None
+        
+    except Exception as e:
+        return None, None, str(e)
+
+
+def get_backtest_fig(ticker, df):
+    """
+    백테스트 결과(신호 포함) mplfinance 차트 생성
+    """
+    try:
+        if df is None or df.empty:
+            return None, "데이터 없음"
+            
+        # 최근 1년 정도만 시각화 (너무 길면 안보임)
+        plot_df = df.tail(252).copy()
+        
+        ap = []
+        
+        # EMA
+        ap.append(mpf.make_addplot(plot_df['EMA_fast'], color='blue', width=1.0))
+        ap.append(mpf.make_addplot(plot_df['EMA_slow'], color='orange', width=1.0))
+        
+        # Buy/Sell Markers
+        # NaN이 아닌 곳만 찍기 위해 마스킹
+        buy_signals = plot_df['Low'] * 0.98
+        buy_signals[plot_df['Buy'] != 1] = np.nan
+        
+        sell_signals = plot_df['High'] * 1.02
+        sell_signals[plot_df['Sell'] != 1] = np.nan
+        
+        ap.append(mpf.make_addplot(buy_signals, type='scatter', markersize=100, marker='^', color='green'))
+        ap.append(mpf.make_addplot(sell_signals, type='scatter', markersize=100, marker='v', color='red'))
+
+        # Style
+        mc = mpf.make_marketcolors(up='red', down='blue', inherit=True) # 한국 스타일
+        s = mpf.make_mpf_style(marketcolors=mc)
+
+        fig, ax = mpf.plot(plot_df, 
+                           type='candle', 
+                           addplot=ap, 
+                           style=s, 
+                           returnfig=True, 
+                           figsize=(12, 8),
+                           title=f"{ticker} Strategy Signals (Last 1 Year)",
+                           volume=True)
+                           
+        return fig, None
     except Exception as e:
         return None, str(e)

@@ -1,6 +1,6 @@
 import streamlit as st
 import plotly.graph_objects as go
-from utils import calculate_score, get_technical_analysis_fig, get_roc_analysis_fig
+from utils import calculate_score, get_technical_analysis_fig, get_roc_analysis_fig, get_kama_analysis_fig
 
 st.set_page_config(page_title="Stock Trend Scorer", layout="wide")
 
@@ -107,3 +107,22 @@ if submitted or ticker:
                 st.error(f"Could not generate ROC analysis: {roc_error}")
             else:
                 st.pyplot(roc_fig)
+
+            # ───────────────────────────────
+            # New Feature: KAMA Analysis
+            # ───────────────────────────────
+            st.divider()
+            st.subheader(f"🦎 Kaufman Adaptive Moving Average (KAMA): {ticker}")
+            st.markdown("""
+            **Kaufman Adaptive Moving Average (KAMA)** accounts for market noise or volatility. 
+            - It closely follows prices when noise is low.
+            - It smooths out the noise when prices fluctuate significantly.
+            """)
+
+            with st.spinner("Calculating KAMA..."):
+                kama_fig, kama_error = get_kama_analysis_fig(ticker)
+            
+            if kama_error:
+                st.error(f"Could not generate KAMA analysis: {kama_error}")
+            else:
+                st.pyplot(kama_fig)

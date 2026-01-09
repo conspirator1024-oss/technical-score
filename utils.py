@@ -333,3 +333,79 @@ def get_roc_analysis_fig(ticker):
 
     except Exception as e:
         return None, str(e)
+
+# ───────────────────────────────
+# Kaufman Adaptive Moving Average (KAMA) 함수
+# ───────────────────────────────
+def calculate_kama(prices, n=10):
+    """
+    Calculate Kaufman Adaptive Moving Average (KAMA)
+    """
+    # Create a copy to ensure we don't modify original data
+    prices = prices.copy()
+    
+    # Calculate the Efficiency Ratio (ER)
+    change = np.abs(prices - prices.shift(n))
+    volatility = prices.diff().abs().rolling(window=n).sum()
+    
+    # Avoid division by zero
+    volatility = volatility.replace(0, np.nan) 
+    er = change / volatility
+    er = er.fillna(0)
+
+    # Calculate the Smoothing Constant (SC)
+    fastest_sc = 2 / (2 + 1)
+    slowest_sc = 2 / (30 + 1)
+    sc = np.square(er * (fastest_sc - slowest_sc) + slowest_sc)
+
+    # Calculate the KAMA
+    kama = np.zeros(len(prices))
+    kama[:] = np.nan # Initialize with NaNs
+    
+    # Initialize the first valid KAMA value (typically the n-th price or similar)
+    # The user's code: kama[:n] = prices.values[:n].flatten() 
+    # But usually KAMA starts calculation after n periods.
+    # Let's stick to user's initialization logic but make it robust.
+    
+    price_values = prices.values.flatten() if hasattr(prices.values, 'flatten') else prices.values
+    
+    # Initialize first n values same as price (simple commonly used method for startup)
+    kama[:n] = price_values[:n]
+    
+    for i in range(n, len(prices)):
+        kama[i] = kama[i-1] + sc.values[i] * (price_values[i] - kama[i-1])
+
+    return pd.Series(kama, index=prices.index)
+
+def get_kama_analysis_fig(ticker):
+    """
+    Generate a matplotlib figure for Price and KAMA.
+    Returns (fig, error_message)
+    """
+    try:
+        data = yf.download(ticker, period='1y', interval='1d', progress=False)
+
+        if data.empty:
+            return None, f"No data found for {ticker}."
+            
+        if 'Close' not in data.columns:
+             return None, "Close column not found in data."
+
+        prices = data['Close']
+        kama = calculate_kama(prices)
+
+        # Plotting
+        fig, ax = plt.subplots(figsize=(14, 7))
+        ax.plot(prices.index, prices, label='Price', color='blue', alpha=0.6)
+        ax.plot(prices.index, kama, label='KAMA', color='red', linewidth=1.5)
+
+        ax.set_title(f'Kaufman Adaptive Moving Average (KAMA) for {ticker}')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Price')
+        ax.legend()
+        ax.grid(True)
+        
+        return fig, None
+
+    except Exception as e:
+        return None, str(e)

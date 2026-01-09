@@ -341,8 +341,10 @@ def calculate_kama(prices, n=10):
     """
     Calculate Kaufman Adaptive Moving Average (KAMA)
     """
-    # Create a copy to ensure we don't modify original data
+    # Create a copy and ensure 1D Series
     prices = prices.copy()
+    if isinstance(prices, pd.DataFrame):
+        prices = prices.iloc[:, 0]  # Take the first column if it's a DataFrame
     
     # Calculate the Efficiency Ratio (ER)
     change = np.abs(prices - prices.shift(n))
@@ -358,22 +360,21 @@ def calculate_kama(prices, n=10):
     slowest_sc = 2 / (30 + 1)
     sc = np.square(er * (fastest_sc - slowest_sc) + slowest_sc)
 
-    # Calculate the KAMA
-    kama = np.zeros(len(prices))
-    kama[:] = np.nan # Initialize with NaNs
+    # Ensure we are working with flat numpy arrays for the loop
+    # This prevents "setting an array element with a sequence" errors
+    # if pandas objects have dimension weirdness.
+    price_values = prices.values.flatten()
+    sc_values = sc.values.flatten()
+    kama = np.zeros(len(price_values))
+    kama[:] = np.nan
     
-    # Initialize the first valid KAMA value (typically the n-th price or similar)
-    # The user's code: kama[:n] = prices.values[:n].flatten() 
-    # But usually KAMA starts calculation after n periods.
-    # Let's stick to user's initialization logic but make it robust.
-    
-    price_values = prices.values.flatten() if hasattr(prices.values, 'flatten') else prices.values
-    
-    # Initialize first n values same as price (simple commonly used method for startup)
+    # Initialize first n values same as price
+    # (Use first valid price or just copy first n)
     kama[:n] = price_values[:n]
     
-    for i in range(n, len(prices)):
-        kama[i] = kama[i-1] + sc.values[i] * (price_values[i] - kama[i-1])
+    for i in range(n, len(price_values)):
+        # Calculate KAMA step by step using scalar values
+        kama[i] = kama[i-1] + sc_values[i] * (price_values[i] - kama[i-1])
 
     return pd.Series(kama, index=prices.index)
 

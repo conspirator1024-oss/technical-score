@@ -136,6 +136,8 @@ def calculate_score(symbol):
 # ───────────────────────────────
 import yfinance as yf
 import mplfinance as mpf
+import matplotlib
+matplotlib.use('Agg') # Headless mode for Streamlit Cloud
 import matplotlib.pyplot as plt
 
 def get_stock_data_unified(ticker, start_date, end_date):

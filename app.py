@@ -1,6 +1,6 @@
 import streamlit as st
 import plotly.graph_objects as go
-from utils import calculate_score, get_technical_analysis_fig
+from utils import calculate_score, get_technical_analysis_fig, get_roc_analysis_fig
 
 st.set_page_config(page_title="Stock Trend Scorer", layout="wide")
 
@@ -88,3 +88,22 @@ if submitted or ticker:
                 st.info("Note: 'yfinance' mainly supports US stocks. For Korean stocks, try adding '.KS' (e.g. 005930.KS).")
             else:
                 st.pyplot(tech_fig)
+
+            # ───────────────────────────────
+            # New Feature: ROC & Delta ROC Analysis
+            # ───────────────────────────────
+            st.divider()
+            st.subheader(f"🚀 ROC (Velocity) & Delta ROC (Acceleration): {ticker}")
+            st.markdown("""
+            This section analyzes the **Velocity** (Speed of price change) and **Acceleration** (Change in velocity).
+            - **ROC (Velocity)**: Measures how fast the price is changing over 20 days.
+            - **Delta ROC (Acceleration)**: Measures how fast the ROC itself is changing. Increasing acceleration often precedes strong moves.
+            """)
+
+            with st.spinner("Calculating Momentum Indicators..."):
+                roc_fig, roc_error = get_roc_analysis_fig(ticker)
+            
+            if roc_error:
+                st.error(f"Could not generate ROC analysis: {roc_error}")
+            else:
+                st.pyplot(roc_fig)

@@ -250,3 +250,86 @@ def get_technical_analysis_fig(ticker):
         return fig, None
     except Exception as e:
         return None, f"차트 그리기 중 오류 발생: {e}"
+
+# ───────────────────────────────
+# ROC (Velocity) & Delta ROC (Acceleration) 함수
+# ───────────────────────────────
+def calculate_roc(series, n=20):
+    """
+    Calculate the Rate of Change (ROC) indicator.
+    Formula: ROC = ((Current Value - Value "n" periods ago) / Value "n" periods ago) * 100
+    """
+    roc = ((series - series.shift(n)) / series.shift(n)) * 100
+    return roc
+
+def get_roc_analysis_fig(ticker):
+    """
+    Generate a matplotlib figure for Price, ROC (Velocity), and Delta ROC (Acceleration).
+    Returns (fig, error_message)
+    """
+    try:
+        # Download data for the last 2 years
+        # yf.download might print progress to stdout, which we can't easily capture in streamlit
+        # but it returns a dataframe. 
+        # Using auto_adjust=True to get meaningful Close prices if needed, 
+        # but standard download is fine as per user snippet.
+        data = yf.download(ticker, period="2y", progress=False)
+
+        if data.empty:
+            return None, f"No data found for {ticker}."
+
+        # Ensure we have a Close column (yfinance usually returns 'Close' or 'Adj Close')
+        # User script uses 'Close'. valid for yfinance.
+        if 'Close' not in data.columns:
+             return None, "Close column not found in data."
+
+        # Calculate ROC (Velocity)
+        n = 20
+        # Create a copy to avoid SettingWithCopy warnings if any
+        plot_data = data.copy()
+        
+        # yfinance columns can be MultiIndex if multiple tickers, but here we expect one.
+        # If plot_data['Close'] is a DataFrame (multi-ticker), this might fail, 
+        # but the app asks for one ticker at a time.
+        
+        plot_data['ROC'] = calculate_roc(plot_data['Close'], n)
+
+        # Calculate Delta ROC (Acceleration) = ROC of ROC
+        plot_data['Delta_ROC'] = calculate_roc(plot_data['ROC'], n)
+
+        # Drop NaN values created by shift
+        plot_data = plot_data.dropna()
+
+        if plot_data.empty:
+             return None, "Not enough data to calculate ROC/Delta ROC (need > 40 days)."
+
+        # Plotting
+        # Create figure with 3 subplots
+        fig, axes = plt.subplots(3, 1, figsize=(12, 12))
+        
+        # Subplot 1: Closing Price
+        axes[0].plot(plot_data.index, plot_data['Close'], label='Close Price')
+        axes[0].set_title(f'{ticker} Closing Price')
+        axes[0].legend()
+        axes[0].grid(True)
+
+        # Subplot 2: ROC (Velocity)
+        axes[1].plot(plot_data.index, plot_data['ROC'], label=f'{n}-Day ROC (Velocity)', color='orange')
+        axes[1].axhline(0, color='black', linewidth=1, linestyle='--')
+        axes[1].set_title(f'{ticker} Rate of Change (Velocity)')
+        axes[1].legend()
+        axes[1].grid(True)
+
+        # Subplot 3: Delta ROC (Acceleration)
+        axes[2].plot(plot_data.index, plot_data['Delta_ROC'], label=f'{n}-Day Delta ROC (Acceleration)', color='green')
+        axes[2].axhline(0, color='black', linewidth=1, linestyle='--')
+        axes[2].set_title(f'{ticker} Delta ROC (Acceleration)')
+        axes[2].legend()
+        axes[2].grid(True)
+
+        plt.tight_layout()
+        
+        return fig, None
+
+    except Exception as e:
+        return None, str(e)

@@ -6,3 +6,5 @@ plotly
 yfinance
 mplfinance
 matplotlib
+fpdf2
+kaleido

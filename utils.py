@@ -4,6 +4,15 @@ import numpy as np
 from datetime import datetime, timedelta
 import math
 from dataclasses import dataclass
+from fpdf import FPDF
+import tempfile
+import os
+from pathlib import Path
+import yfinance as yf
+import mplfinance as mpf
+import matplotlib
+matplotlib.use('Agg') # Headless mode for Streamlit Cloud
+import matplotlib.pyplot as plt
 
 # ───────────────────────────────
 # 주식 데이터 다운로드 및 정리 (fdr 기반)
@@ -41,6 +50,32 @@ def download_stock_data_fdr(ticker):
     if not np.issubdtype(df.index.dtype, np.datetime64):
         df.index = pd.to_datetime(df.index)
     return df
+
+def get_kr_stocks():
+    """
+    Fetch list of Korean stocks (KRX) containing Name and Code.
+    Returns DataFrame with columns ['Code', 'Name', 'Market']
+    """
+    try:
+        # KRX: KOSPI, KOSDAQ, KONEX
+        df = fdr.StockListing('KRX')
+        return df[['Code', 'Name', 'Market']]
+    except Exception as e:
+        print(f"KR Stock listing error: {e}")
+        return pd.DataFrame()
+
+def get_kr_stocks():
+    """
+    Fetch list of Korean stocks (KRX) containing Name and Code.
+    Returns DataFrame with columns ['Code', 'Name', 'Market']
+    """
+    try:
+        # KRX: KOSPI, KOSDAQ, KONEX
+        df = fdr.StockListing('KRX')
+        return df[['Code', 'Name', 'Market']]
+    except Exception as e:
+        print(f"KR Stock listing error: {e}")
+        return pd.DataFrame()
 
 # ───────────────────────────────
 # 최종 스코어 계산 함수
@@ -134,11 +169,6 @@ def calculate_score(symbol):
 # ───────────────────────────────
 # 새로운 기능: Technical Analysis (EMA + RS)
 # ───────────────────────────────
-import yfinance as yf
-import mplfinance as mpf
-import matplotlib
-matplotlib.use('Agg') # Headless mode for Streamlit Cloud
-import matplotlib.pyplot as plt
 
 def get_stock_data_unified(ticker, start_date, end_date):
     """
@@ -178,8 +208,15 @@ def get_stock_data_unified(ticker, start_date, end_date):
         # Fallback to YF
         if stock_df is None or stock_df.empty:
             try:
+                # Standard YF download
                 stock_df = yf.download(ticker, start=start_date, end=end_date, progress=False)
                 stock_df = flatten_columns(stock_df, ticker)
+                
+                # If empty and ticker is numeric (likely KR stock), try adding .KS suffix
+                if (stock_df is None or stock_df.empty) and ticker.isdigit():
+                    ticker_ks = f"{ticker}.KS"
+                    stock_df = yf.download(ticker_ks, start=start_date, end=end_date, progress=False)
+                    stock_df = flatten_columns(stock_df, ticker_ks)
             except:
                 pass
 
@@ -258,20 +295,54 @@ def calculate_rs(stock_df, spy_df):
         print(f"RS 계산 중 오류 발생: {e}")
         return None, None
 
-def get_technical_analysis_fig(ticker):
+def get_technical_analysis_fig(ticker, benchmark_ticker="SPY"):
     end_date = datetime.now()
     start_date = end_date - timedelta(days=365)
     
     # 데이터 가져오기
     # 데이터 가져오기 (Unified Fetcher 호출)
     stock_df, spy_df = get_stock_data_unified(ticker, start_date, end_date)
+    
+    # If benchmark is customized and not SPY, fetch it explicitly if needed
+    # But get_stock_data_unified is hardcoded for SPY currently.
+    # Let's modify usage here. 
+    # Actually, let's keep it simple: get_stock_data_unified handles the ticker. 
+    # We need a separate fetch for benchmark if it's not SPY.
+    
+    if benchmark_ticker != "SPY":
+        # Fetch custom benchmark
+        try:
+             # Try FDR first
+             bench_df = fdr.DataReader(benchmark_ticker, start_date, end_date)
+             if bench_df is None or bench_df.empty:
+                  bench_df = yf.download(benchmark_ticker, start=start_date, end=end_date, progress=False)
+             
+             if bench_df is not None and not bench_df.empty:
+                 # Flatten check
+                 if isinstance(bench_df.columns, pd.MultiIndex):
+                      try:
+                          bench_df = bench_df.xs(benchmark_ticker, axis=1, level=1)
+                      except:
+                          bench_df.columns = bench_df.columns.get_level_values(0)
+                 
+                 # Clean
+                 for col in ['Close', 'Adj Close']:
+                      if col in bench_df.columns:
+                           bench_df[col] = pd.to_numeric(bench_df[col], errors='coerce')
+                 if 'Adj Close' not in bench_df.columns and 'Close' in bench_df.columns:
+                      bench_df['Adj Close'] = bench_df['Close']
+                 
+                 spy_df = bench_df
+        except Exception as e:
+             print(f"Benchmark fetch failed: {e}")
+
     if stock_df is None or spy_df is None or stock_df.empty or spy_df.empty:
-        return None, "유효한 데이터를 가져올 수 없습니다. (Tickers might be invalid or no data found)"
+        return None, None, "유효한 데이터를 가져올 수 없습니다. (Tickers might be invalid or no data found)"
 
     # RS 계산
     rs_line, rs_ma50 = calculate_rs(stock_df, spy_df)
     if rs_line is None:
-        return None, "RS 계산 실패 (데이터 부족 또는 날짜 불일치)"
+        return None, None, "RS 계산 실패 (데이터 부족 또는 날짜 불일치)"
 
     # 차트 스타일 설정
     mc = mpf.make_marketcolors(up='green',
@@ -310,9 +381,17 @@ def get_technical_analysis_fig(ticker):
         axes[0].legend(['10 EMA (Orange)', '21 EMA (Blue)'], loc='upper left')
         axes[1].legend(['RS', 'RS 50MA'], loc='upper left')
         
-        return fig, None
+        # RS 데이터 딕셔너리 생성
+        rs_data = {
+            'stock_df': stock_df,
+            'spy_df': spy_df,
+            'rs_line': rs_line,
+            'rs_ma50': rs_ma50
+        }
+        
+        return fig, rs_data, None
     except Exception as e:
-        return None, f"차트 그리기 중 오류 발생: {e}"
+        return None, None, f"차트 그리기 중 오류 발생: {e}"
 
 # ───────────────────────────────
 # ROC (Velocity) & Delta ROC (Acceleration) 함수
@@ -397,10 +476,10 @@ def get_roc_analysis_fig(ticker):
 
         plt.tight_layout()
         
-        return fig, None
+        return fig, plot_data, None
 
     except Exception as e:
-        return None, str(e)
+        return None, None, str(e)
 
 # ───────────────────────────────
 # Kaufman Adaptive Moving Average (KAMA) 함수
@@ -661,3 +740,496 @@ def get_backtest_fig(ticker, df):
         return fig, None
     except Exception as e:
         return None, str(e)
+
+# ───────────────────────────────
+# PDF 리포트 생성 함수
+# ───────────────────────────────
+def create_pdf_report(ticker, score_dict, figures):
+    """
+    Generate PDF report.
+    ticker: str
+    score_data: dict (from calculate_score)
+    figures: dict {'key': fig_object}
+    """
+    class PDF(FPDF):
+        def header(self):
+            self.set_font('Helvetica', 'B', 20)
+            self.cell(0, 10, f'Stock Analysis Report: {ticker}', new_x="LMARGIN", new_y="NEXT", align='C')
+            self.ln(5)
+
+        def footer(self):
+            self.set_y(-15)
+            self.set_font('Helvetica', 'I', 8)
+            self.cell(0, 10, f'Page {self.page_no()}', new_x="LMARGIN", new_y="NEXT", align='C')
+
+    pdf = PDF()
+    pdf.add_page()
+    pdf.set_font("Helvetica", size=12)
+    
+    # 1. Score Summary
+    score = score_dict.get('score', 0)
+    pdf.set_font("Helvetica", 'B', 16)
+    pdf.cell(0, 10, f"Total Score: {score}/3", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(5)
+    
+    details = score_dict.get('details', {})
+    pdf.set_font("Helvetica", size=12)
+    for k, v in details.items():
+        pdf.cell(0, 8, f"{k}: {v}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(10)
+
+    # 2. Charts
+    temp_files = []
+    
+    try:
+        for title, fig in figures.items():
+            pdf.add_page()
+            pdf.set_font("Helvetica", 'B', 14)
+            pdf.cell(0, 10, title, new_x="LMARGIN", new_y="NEXT")
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                temp_filename = tmp.name
+            
+            # Save figure to temp file
+            if hasattr(fig, 'savefig'): # Matplotlib
+                fig.savefig(temp_filename, bbox_inches='tight', dpi=100)
+            elif hasattr(fig, 'write_image'): # Plotly
+                try:
+                    fig.write_image(temp_filename, format="png", engine="kaleido")
+                except Exception as e:
+                    pdf.cell(0, 10, f"Error saving plotly chart: {str(e)}", new_x="LMARGIN", new_y="NEXT")
+                    continue
+            else:
+                continue
+            
+            # Embed in PDF
+            pdf.image(temp_filename, w=170)
+            temp_files.append(temp_filename)
+            
+        return pdf.output()
+            
+    except Exception as e:
+        print(f"PDF Gen Error: {e}")
+        return None
+    finally:
+        # Cleanup temp files
+        for f in temp_files:
+            try:
+                if os.path.exists(f):
+                    os.remove(f)
+            except:
+                pass
+
+# ───────────────────────────────
+# 데이터 기반 분석 (Data-Driven Interpretation)
+# ───────────────────────────────
+
+def get_score_interpretation(result):
+    """
+    종합 점수 및 개별 지표를 바탕으로 한국어 분석 메시지 생성
+    """
+    details = result.get('details', {})
+    score = result.get('score', 0)
+    
+    analysis = []
+    
+    # 1. 종합 의견
+    if score >= 2:
+        analysis.append("🌟 **강력한 수급 및 추세 상승 구간**입니다. 모든 지표가 우호적인 신호를 보내고 있습니다.")
+    elif score >= 1:
+        analysis.append("📈 **긍정적인 추세**가 형성되고 있습니다. 점진적인 수급 개선이 확인됩니다.")
+    elif score <= -2:
+        analysis.append("⚠️ **강한 하락 압력**을 받고 있습니다. 리스크 관리가 최우선인 구간입니다.")
+    elif score <= -1:
+        analysis.append("📉 **추세가 약화**되고 있습니다. 지지선 확인이 필요한 시점입니다.")
+    else:
+        analysis.append("⚖️ **방향성 탐색 구간**입니다. 횡보세가 이어며 에너지를 응축하고 있습니다.")
+        
+    # 2. 세부 분석
+    ema_s = details.get('EMA Score', 0)
+    if ema_s > 0:
+        analysis.append(f"- **이평선**: 주가가 주요 장단기 이동평균선 위에 위치하여 지지력이 견고합니다.")
+    else:
+        analysis.append(f"- **이평선**: 단기/중기 이평선을 하회하고 있어 정배열로의 전환이 필요합니다.")
+        
+    ppo_s = details.get('PPO Score', 0)
+    if ppo_s > 0:
+        analysis.append(f"- **모멘텀**: PPO 가속도가 붙고 있어 상승 탄력이 강화되는 단계입니다.")
+    else:
+        analysis.append(f"- **모멘텀**: 모멘텀 탄력이 줄어들고 있거나 하락세가 지속되고 있습니다.")
+        
+    rsi_s = details.get('RSI Score', 0)
+    if rsi_s < 0:
+        analysis.append(f"- **RSI**: 현재 과매수권에 진입하여 단기 차익 실현 매물에 주의가 필요합니다.")
+    elif rsi_s > 0:
+        analysis.append(f"- **RSI**: 과매도권에서 반등을 모색하고 있어 기술적 반등 가능성이 높습니다.")
+        
+    return "\n".join(analysis)
+
+def get_roc_interpretation(df):
+    """
+    ROC 및 Delta ROC를 통한 속도/가속도 분석
+    """
+    if 'ROC' not in df.columns or 'Delta_ROC' not in df.columns:
+        return "데이터가 부족하여 분석을 생성할 수 없습니다."
+        
+    curr_roc = df['ROC'].iloc[-1]
+    curr_acc = df['Delta_ROC'].iloc[-1]
+    
+    analysis = []
+    
+    # 속도 분석
+    if curr_roc > 5:
+        analysis.append("🏃‍♂️ **빠른 상승 속도**: 현재 주가가 강력한 속도로 우상향하고 있습니다.")
+    elif curr_roc < -5:
+        analysis.append("⛷️ **빠른 하락 속도**: 하향 이탈 속도가 가파르므로 주의가 필요합니다.")
+    else:
+        analysis.append("🚶 **안정적인 흐름**: 속도의 변화가 크지 않은 완만한 구간입니다.")
+        
+    # 가속도 분석
+    if curr_acc > 0:
+        analysis.append("🚀 **가속도 증가**: 상승의 힘(가속)이 더 강해지고 있어 추가 탄력이 기대됩니다.")
+    else:
+        analysis.append("🛑 **가속도 둔화**: 상승 속도가 줄어들고 있어 추세 반전이나 횡보 가능성이 보입니다.")
+        
+    return "\n".join(analysis)
+
+def get_kama_interpretation(df, kama_series):
+    """
+    KAMA와 주가 관계 분석
+    """
+    curr_price = df['Close'].iloc[-1]
+    curr_kama = kama_series.iloc[-1]
+    
+    if curr_price > curr_kama:
+        return "🛠️ **KAMA 분석**: 주가가 적응형 이평선(KAMA) 위에 있어 소음(Noise)을 극복한 **안정적 상승세**로 판단됩니다."
+    else:
+        return "🛠️ **KAMA 분석**: 주가가 KAMA 아래로 내려왔습니다. 시장의 변동성에 의해 **단기 추세가 이탈**된 상태입니다."
+
+
+# ───────────────────────────────
+# 향상된 종목별 데이터 기반 해석 함수들
+# ───────────────────────────────
+
+def get_ema_chart_interpretation(df):
+    """
+    Price & EMA Chart 종목별 상세 해석
+    - 현재가 vs 주요 이평선 위치
+    - 정배열/역배열 상태
+    - 골든크로스/데드크로스 탐지
+    - 액션 가이드
+    """
+    try:
+        if df is None or df.empty or 'Adj Close' not in df.columns:
+            return "📊 데이터가 부족하여 EMA 분석을 수행할 수 없습니다."
+        
+        analysis = []
+        curr_price = df['Adj Close'].iloc[-1]
+        
+        # 1. 현재가 vs 주요 이평선 위치
+        ema_cols = ['20_day_ema', '50_day_ema', '200_day_ema']
+        positions = {}
+        
+        for col in ema_cols:
+            if col in df.columns and not pd.isna(df[col].iloc[-1]):
+                ema_val = df[col].iloc[-1]
+                diff_pct = ((curr_price - ema_val) / ema_val * 100)
+                positions[col] = {'value': ema_val, 'diff_pct': diff_pct}
+        
+        if positions:
+            # 20일선 위치 (가장 중요)
+            if '20_day_ema' in positions:
+                ema20 = positions['20_day_ema']
+                direction = "위" if ema20['diff_pct'] > 0 else "아래"
+                analysis.append(f"📍 **현재 위치**: 주가 ${curr_price:.2f}, 20일선(${ema20['value']:.2f}) {direction} {abs(ema20['diff_pct']):.2f}%")
+        
+        # 2. 정배열/역배열 판단
+        if all(col in df.columns for col in ['20_day_ema', '50_day_ema', '200_day_ema']):
+            ema20 = df['20_day_ema'].iloc[-1]
+            ema50 = df['50_day_ema'].iloc[-1]
+            ema200 = df['200_day_ema'].iloc[-1]
+            
+            if ema20 > ema50 > ema200:
+                analysis.append("🎯 **정배열 상태**: 20 > 50 > 200 (강력한 상승 추세)")
+            elif ema20 < ema50 < ema200:
+                analysis.append("⚠️ **역배열 상태**: 20 < 50 < 200 (하락 추세)")
+            else:
+                analysis.append("⚖️ **혼조 상태**: 이평선들이 뒤엉켜 방향성을 찾는 중")
+        
+        # 3. 골든크로스/데드크로스 탐지 (최근 10일 이내)
+        if '20_day_ema' in df.columns and '50_day_ema' in df.columns:
+            # 최근 10일간 데이터 확인
+            lookback = min(10, len(df))
+            recent_df = df.tail(lookback)
+            
+            if len(recent_df) >= 2:
+                # 골든크로스: 20선이 50선을 상향 돌파
+                for i in range(len(recent_df) - 1):
+                    prev_20 = recent_df['20_day_ema'].iloc[i]
+                    prev_50 = recent_df['50_day_ema'].iloc[i]
+                    curr_20 = recent_df['20_day_ema'].iloc[i + 1]
+                    curr_50 = recent_df['50_day_ema'].iloc[i + 1]
+                    
+                    if prev_20 <= prev_50 and curr_20 > curr_50:
+                        days_ago = len(recent_df) - i - 2
+                        analysis.append(f"⚡ **골든크로스**: 20일선이 50일선을 {days_ago}일 전 돌파 (매수 신호 발생)")
+                        break
+                    elif prev_20 >= prev_50 and curr_20 < curr_50:
+                        days_ago = len(recent_df) - i - 2
+                        analysis.append(f"🔻 **데드크로스**: 20일선이 50일선을 {days_ago}일 전 하향 이탈 (매도 신호 발생)")
+                        break
+        
+        # 4. 액션 가이드
+        if '20_day_ema' in positions and '50_day_ema' in positions:
+            ema20_above = positions['20_day_ema']['diff_pct'] > 0
+            ema50_above = positions['50_day_ema']['diff_pct'] > 0
+            
+            if ema20_above and ema50_above:
+                analysis.append("💡 **액션 가이드**: 추세 추종 매수 전략 유효, 20일선이 동적 지지선 역할")
+            elif not ema20_above and not ema50_above:
+                analysis.append("💡 **액션 가이드**: 하락 추세, 20일선 상향 돌파 시까지 관망 권장")
+            else:
+                analysis.append("💡 **액션 가이드**: 추세 전환 구간, 50일선 돌파 여부 주시 필요")
+        
+        return "\n".join(analysis) if analysis else "📊 EMA 분석 결과를 생성할 수 없습니다."
+        
+    except Exception as e:
+        return f"📊 EMA 해석 중 오류 발생: {str(e)}"
+
+def get_rs_interpretation(stock_df, spy_df, rs_line, rs_ma50):
+    """
+    RS (Relative Strength) Line 상세 해석
+    """
+    try:
+        if rs_line is None or len(rs_line) < 50:
+            return "📊 RS 데이터가 부족하여 분석할 수 없습니다."
+        
+        analysis = []
+        curr_rs = rs_line.iloc[-1]
+        curr_rs_ma = rs_ma50.iloc[-1] if rs_ma50 is not None and len(rs_ma50) > 0 else None
+        
+        # 1. RS 절대값 평가
+        rs_status = "중립"
+        if curr_rs > 70:
+            rs_status = "강세"
+        elif curr_rs < 30:
+            rs_status = "약세"
+        
+        analysis.append(f"📊 **상대 강도**: {curr_rs:.1f}/100 (시장 대비 {rs_status})")
+        
+        # 2. RS 추세 방향
+        if len(rs_line) >= 10:
+            rs_2weeks_ago = rs_line.iloc[-10]
+            rs_change = curr_rs - rs_2weeks_ago
+            trend_desc = "상승 중" if rs_change > 0 else "하락 중"
+            
+            if curr_rs_ma is not None and not pd.isna(curr_rs_ma):
+                ma_relation = "위" if curr_rs > curr_rs_ma else "아래"
+                analysis.append(f"📈 **추세**: RS선이 50일 평균({curr_rs_ma:.1f}) {ma_relation}에서 {trend_desc} ({rs_change:+.1f}pt, 2주간)")
+            else:
+                analysis.append(f"📈 **추세**: {trend_desc} ({rs_change:+.1f}pt, 2주간)")
+        
+        # 3. 주도주/낙오주 판정
+        if curr_rs > 60 and (curr_rs_ma is None or curr_rs > curr_rs_ma):
+            analysis.append("🏆 **평가**: 주도주 후보 - 시장 하락 시에도 방어력 우수")
+            analysis.append("💡 **액션 가이드**: 시장 조정 시 우선 매수 대상, 상대적 강세 유지 중")
+        elif curr_rs < 40 and (curr_rs_ma is None or curr_rs < curr_rs_ma):
+            analysis.append("📉 **평가**: 시장 대비 약세 - 섹터 또는 종목 고유 이슈 점검 필요")
+            analysis.append("💡 **액션 가이드**: RS가 50선 돌파 시까지 관망, 상대적 약세 지속")
+        else:
+            analysis.append("⚖️ **평가**: 시장과 동조화 - 평균적인 움직임")
+            analysis.append("💡 **액션 가이드**: RS 상승 돌파 시 주도주 전환 가능성 주시")
+        
+        return "\n".join(analysis)
+        
+    except Exception as e:
+        return f"📊 RS 해석 중 오류 발생: {str(e)}"
+
+def get_roc_interpretation_enhanced(df_with_roc):
+    """
+    ROC & Delta ROC 향상된 해석
+    """
+    try:
+        if df_with_roc is None or df_with_roc.empty:
+            return "📊 ROC 데이터가 부족하여 분석할 수 없습니다."
+        
+        if 'ROC' not in df_with_roc.columns or 'Delta_ROC' not in df_with_roc.columns:
+            return "📊 ROC 계산이 완료되지 않았습니다."
+        
+        analysis = []
+        curr_roc = df_with_roc['ROC'].iloc[-1]
+        curr_delta_roc = df_with_roc['Delta_ROC'].iloc[-1]
+        
+        # 과거 평균 비교
+        lookback = min(120, len(df_with_roc))
+        if lookback > 20:
+            roc_history = df_with_roc['ROC'].tail(lookback)
+            avg_roc = roc_history.mean()
+            
+            if abs(avg_roc) > 0.1:
+                speed_ratio = abs(curr_roc) / abs(avg_roc)
+                analysis.append(f"🏃 **속도(ROC)**: {curr_roc:+.2f}% (20일 전 대비 상승률)")
+                analysis.append(f"  - 과거 6개월 평균({avg_roc:+.2f}%) 대비 {speed_ratio:.1f}배")
+            else:
+                analysis.append(f"🏃 **속도(ROC)**: {curr_roc:+.2f}% (20일 전 대비)")
+        else:
+            analysis.append(f"🏃 **속도(ROC)**: {curr_roc:+.2f}% (20일 전 대비)")
+        
+        # 속도 해석
+        if curr_roc > 10:
+            analysis.append("  - ⚡ 빠른 상승 속도 - 강한 상승 모멘텀")
+        elif curr_roc < -10:
+            analysis.append("  - 🔻 빠른 하락 속도 - 조정 압력")
+        elif abs(curr_roc) < 3:
+            analysis.append("  - 🚶 완만한 흐름 - 횡보 구간")
+        
+        # 가속도 분석
+        analysis.append(f"\n🚀 **가속도(Delta ROC)**: {curr_delta_roc:+.2f}%")
+        
+        if curr_delta_roc > 1:
+            analysis.append("  - 가속도 증가 중 - 상승의 힘이 강화되는 단계")
+        elif curr_delta_roc < -1:
+            analysis.append("  - 가속도 감소 중 - 모멘텀 둔화, 추세 반전 주의")
+        else:
+            analysis.append("  - 가속도 중립 - 현재 속도 유지")
+        
+        # 액션 가이드
+        if curr_roc > 5 and curr_delta_roc > 0:
+            analysis.append("\n💡 **액션 가이드**: 모멘텀 매수 타이밍, 가속 진행 중 (단 ROC > +15% 시 단기 과열 주의)")
+        elif curr_roc < -5 and curr_delta_roc < 0:
+            analysis.append("\n💡 **액션 가이드**: 하락 가속 구간, 반등 대기 또는 손절 고려")
+        elif curr_roc > 0 and curr_delta_roc < 0:
+            analysis.append("\n💡 **액션 가이드**: 상승 모멘텀 둔화 중, 익절 타이밍 검토")
+        elif curr_roc < 0 and curr_delta_roc > 0:
+            analysis.append("\n💡 **액션 가이드**: 하락 속도 둔화, 바닥 근접 신호 (반등 준비)")
+        else:
+            analysis.append("\n💡 **액션 가이드**: 중립 구간, 명확한 모멘텀 신호 대기")
+        
+        return "\n".join(analysis)
+        
+    except Exception as e:
+        return f"📊 ROC 해석 중 오류 발생: {str(e)}"
+
+def get_kama_interpretation_enhanced(df, kama_series):
+    """
+    KAMA 향상된 해석
+    """
+    try:
+        if df is None or kama_series is None or len(kama_series) < 10:
+            return "🦎 KAMA 데이터가 부족하여 분석할 수 없습니다."
+        
+        if 'Close' not in df.columns:
+            return "🦎 주가 데이터가 부족합니다."
+        
+        analysis = []
+        curr_price = df['Close'].iloc[-1]
+        curr_kama = kama_series.iloc[-1]
+        
+        # 1. KAMA 변화율
+        if len(kama_series) >= 5:
+            kama_5d_ago = kama_series.iloc[-5]
+            kama_change_pct = ((curr_kama - kama_5d_ago) / kama_5d_ago * 100) if kama_5d_ago != 0 else 0
+            
+            trend_strength = "완만한" if abs(kama_change_pct) < 1 else "뚜렷한"
+            trend_dir = "상승" if kama_change_pct > 0 else "하락"
+            
+            analysis.append(f"🦎 **KAMA**: ${curr_kama:.2f} (5일간 {kama_change_pct:+.2f}% {trend_dir} - {trend_strength} 추세)")
+        else:
+            analysis.append(f"🦎 **KAMA**: ${curr_kama:.2f}")
+        
+        # 2. 주가 vs KAMA 위치
+        price_diff_pct = ((curr_price - curr_kama) / curr_kama * 100) if curr_kama != 0 else 0
+        position = "위" if price_diff_pct > 0 else "아래"
+        
+        analysis.append(f"📍 **주가 위치**: KAMA {position} {abs(price_diff_pct):.2f}%")
+        
+        # 3. KAMA 기울기
+        if len(kama_series) >= 5:
+            daily_changes = kama_series.diff().tail(5)
+            avg_daily_change = daily_changes.mean()
+            avg_daily_pct = (avg_daily_change / curr_kama * 100) if curr_kama != 0 else 0
+            
+            slope_desc = "가파름" if abs(avg_daily_pct) > 0.3 else "완만함"
+            analysis.append(f"📐 **기울기**: {slope_desc} (최근 5일 평균 일일 {avg_daily_pct:+.2f}%)")
+        
+        # 4. 액션 가이드
+        if len(kama_series) >= 5:
+            kama_5d_ago = kama_series.iloc[-5]
+            kama_change_pct = ((curr_kama - kama_5d_ago) / kama_5d_ago * 100) if kama_5d_ago != 0 else 0
+            daily_changes = kama_series.diff().tail(5)
+            avg_daily_change = daily_changes.mean()
+            avg_daily_pct = (avg_daily_change / curr_kama * 100) if curr_kama != 0 else 0
+            
+            if abs(kama_change_pct) > 2 and abs(avg_daily_pct) > 0.3:
+                if price_diff_pct > 0:
+                    analysis.append("\n💡 **액션 가이드**: 추세장 확정, KAMA가 동적 지지선 역할 (상승 추세 추종)")
+                else:
+                    analysis.append("\n💡 **액션 가이드**: 하락 추세 진행 중, KAMA 상향 돌파 시까지 관망")
+            elif abs(kama_change_pct) < 1:
+                analysis.append("\n💡 **액션 가이드**: 횡보장, 소음(Noise) 많은 구간 - 방향성 확정 대기")
+            else:
+                analysis.append("\n💡 **액션 가이드**: 추세 형성 초기 단계, KAMA 기울기 증가 여부 모니터링")
+        
+        return "\n".join(analysis)
+        
+    except Exception as e:
+        return f"🦎 KAMA 해석 중 오류 발생: {str(e)}"
+
+def get_backtest_interpretation(metrics, bt_df):
+    """
+    Backtest Results 상세 해석
+    """
+    try:
+        if metrics is None or bt_df is None or bt_df.empty:
+            return "🛠️ 백테스트 데이터가 없습니다."
+        
+        analysis = []
+        
+        # 1. 성과 비교
+        final_equity = bt_df['Equity'].iloc[-1]
+        final_buyhold = bt_df['BuyHold'].iloc[-1]
+        initial_capital = bt_df['Equity'].iloc[0]
+        
+        strategy_return = ((final_equity - initial_capital) / initial_capital * 100)
+        buyhold_return = ((final_buyhold - initial_capital) / initial_capital * 100)
+        outperformance = strategy_return - buyhold_return
+        
+        perf_status = "우수" if outperformance > 0 else "부진"
+        
+        analysis.append(f"📊 **전략 성과**: CAGR {metrics.cagr:+.2f}% (바이앤홀드 {buyhold_return:+.1f}% 대비 {outperformance:+.1f}%p {perf_status})")
+        
+        # 2. 리스크 지표
+        analysis.append(f"⚠️ **리스크**: MDD {metrics.mdd:.2f}% (최대 낙폭)")
+        
+        sharpe_eval = "우수" if metrics.sharpe > 1.0 else "보통" if metrics.sharpe > 0.5 else "낮음"
+        analysis.append(f"📈 **샤프 비율**: {metrics.sharpe:.2f} (위험 대비 수익 {sharpe_eval})")
+        
+        # 3. 현재 포지션
+        if bt_df['Position'].iloc[-1] == 1:
+            buy_dates = bt_df.index[bt_df['Buy'] == 1]
+            if len(buy_dates) > 0:
+                last_buy_date = buy_dates[-1]
+                last_buy_price = bt_df.loc[last_buy_date, 'Close']
+                curr_price = bt_df['Close'].iloc[-1]
+                curr_profit = ((curr_price - last_buy_price) / last_buy_price * 100)
+                
+                analysis.append(f"🎯 **현재 상태**: 보유 중 ({last_buy_date.strftime('%Y-%m-%d')} 매수, 현재 {curr_profit:+.2f}%)")
+        else:
+            analysis.append(f"🎯 **현재 상태**: 현금 (마지막 청산: {metrics.last_sell})")
+        
+        # 4. 액션 가이드
+        if metrics.sharpe > 1.0 and outperformance > 5:
+            analysis.append("\n💡 **액션 가이드**: 전략 신뢰도 높음, 시그널 기반 매매 권장")
+            if bt_df['Position'].iloc[-1] == 1:
+                analysis.append("  - 현재 보유 중 - EMA_fast 하락 전환 시 청산 신호 대기")
+            else:
+                analysis.append("  - 현재 현금 - 다음 매수 신호(EMA 골든크로스 + OBV 상승) 대기")
+        elif outperformance < -5:
+            analysis.append("\n💡 **액션 가이드**: 전략이 바이앤홀드 대비 부진, 파라미터 조정 또는 전략 재검토 필요")
+        else:
+            analysis.append("\n💡 **액션 가이드**: 전략 참고용, 다른 기술적 지표와 병행 사용 권장")
+        
+        return "\n".join(analysis)
+        
+    except Exception as e:
+        return f"🛠️ 백테스트 해석 중 오류 발생: {str(e)}"

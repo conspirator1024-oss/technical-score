@@ -135,7 +135,7 @@ st.markdown("""
     /* Hide some default streamlit elements */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    header {visibility: hidden;}
+    /* header {visibility: hidden;} Removed to allow mobile sidebar menu button */
 
     /* Sidebar Selectbox/Input Styling for visibility */
     [data-testid="stSidebar"] div[data-baseweb="select"] > div {

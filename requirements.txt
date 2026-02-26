@@ -8,3 +8,6 @@ mplfinance
 matplotlib
 fpdf2
 kaleido
+finnhub-python
+beautifulsoup4
+lxml
